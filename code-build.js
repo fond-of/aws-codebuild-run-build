@@ -1,11 +1,11 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-const core = require("@actions/core");
-const github = require("@actions/github");
-const { CloudWatchLogs } = require("@aws-sdk/client-cloudwatch-logs");
-const { CodeBuild } = require("@aws-sdk/client-codebuild");
-const assert = require("assert");
+const core = require('@actions/core')
+const github = require('@actions/github')
+const { CloudWatchLogs } = require('@aws-sdk/client-cloudwatch-logs')
+const { CodeBuild } = require('@aws-sdk/client-codebuild')
+const assert = require('assert')
 
 module.exports = {
   runBuild,
@@ -15,13 +15,13 @@ module.exports = {
   githubInputs,
   buildSdk,
   logName,
-};
+}
 
 function runBuild() {
   // get a codeBuild instance from the SDK
-  const sdk = buildSdk();
+  const sdk = buildSdk()
 
-  const inputs = githubInputs();
+  const inputs = githubInputs()
 
   const config = (({
     updateInterval,
@@ -33,45 +33,48 @@ function runBuild() {
     updateBackOff,
     hideCloudWatchLogs,
     stopOnSignals,
-  }))(inputs);
+  }))(inputs)
 
   // Get input options for startBuild
-  const params = inputs2Parameters(inputs);
+  const params = inputs2Parameters(inputs)
 
-  return build(sdk, params, config);
+  return build(sdk, params, config)
 }
 
 async function build(sdk, params, config) {
   // Start the build
-  const start = await sdk.codeBuild.startBuildBatch(params);
+  const start = await sdk.codeBuild.startBuildBatch(params)
 
   // Set up signal handling to stop the build on cancellation
-  setupSignalHandlers(sdk, start.buildBatch.id, config.stopOnSignals);
+  setupSignalHandlers(sdk, start.buildBatch.id, config.stopOnSignals)
 
   // Wait for the build to "complete"
-  return waitForBuildEndTime(sdk, start.buildBatch, config);
+  return waitForBuildEndTime(sdk, start.buildBatch, config)
 }
 
 function setupSignalHandlers(sdk, id, signals) {
   signals.forEach((s) => {
-    core.info(`Installing signal handler for ${s}`);
+    core.info(`Installing signal handler for ${s}`)
     process.on(s, async () => {
       try {
-        core.info(`Caught ${s}, attempting to stop build...`);
-        await sdk.codeBuild.stopBuildBatch({ id });
+        core.info(`Caught ${s}, attempting to stop build...`)
+        await sdk.codeBuild.stopBuildBatch({ id })
       } catch (ex) {
-        core.error(`Error stopping build: ${ex}`);
+        core.error(`Error stopping build: ${ex}`)
       }
-    });
-  });
+    })
+  })
 }
 
 const startFromHeads = {}
 const nextTokens = {}
 
-async function resolveBuildLogs (sdk, {logs, environment: {environmentVariables}}) {
-  const { cloudWatchLogs } = sdk;
-  const {groupName: logGroupName, streamName: logStreamName} = logs;
+async function resolveBuildLogs(
+  sdk,
+  { logs, environment: { environmentVariables } }
+) {
+  const { cloudWatchLogs } = sdk
+  const { groupName: logGroupName, streamName: logStreamName } = logs
 
   if (!(logStreamName in startFromHeads)) {
     startFromHeads[logStreamName] = true
@@ -84,25 +87,34 @@ async function resolveBuildLogs (sdk, {logs, environment: {environmentVariables}
     return
   }
 
-  const logsResponse = await cloudWatchLogs
-      .getLogEvents({
-        logGroupName,
-        logStreamName,
-        startFromHead,
-        nextToken,
-      })
+  const logsResponse = await cloudWatchLogs.getLogEvents({
+    logGroupName,
+    logStreamName,
+    startFromHead,
+    nextToken,
+  })
 
   nextTokens[logStreamName] = logsResponse.nextForwardToken
   startFromHeads[logStreamName] = false
 
-  const browser = (environmentVariables.find(environmentVariable => environmentVariable.name === 'CYPRESS_BROWSER') || {value: undefined}).value
-  const brand = (environmentVariables.find(environmentVariable => environmentVariable.name === 'BRAND') || {value: undefined}).value
+  const browser = (
+    environmentVariables.find(
+      (environmentVariable) => environmentVariable.name === 'CYPRESS_BROWSER'
+    ) || { value: undefined }
+  ).value
+  const brand = (
+    environmentVariables.find(
+      (environmentVariable) => environmentVariable.name === 'BRAND'
+    ) || { value: undefined }
+  ).value
 
-  const prefixes = [brand, browser].filter(env => !!env)
+  const prefixes = [brand, browser].filter((env) => !!env)
 
-  logsResponse.events = logsResponse.events.map(event => ({
+  logsResponse.events = logsResponse.events.map((event) => ({
     ...event,
-    message: prefixes ? `[${prefixes.join('_')}] ${event.message}` : event.message
+    message: prefixes
+      ? `[${prefixes.join('_')}] ${event.message}`
+      : event.message,
   }))
 
   return logsResponse
@@ -116,38 +128,38 @@ async function waitForBuildEndTime(
   totalEvents,
   throttleCount
 ) {
-  const { codeBuild } = sdk;
+  const { codeBuild } = sdk
 
-  totalEvents = totalEvents || 0;
-  seqEmptyLogs = seqEmptyLogs || 0;
-  throttleCount = throttleCount || 0;
+  totalEvents = totalEvents || 0
+  seqEmptyLogs = seqEmptyLogs || 0
+  throttleCount = throttleCount || 0
 
-  let errObject = false;
+  let errObject = false
   // Check the state
   const [buildBatchesResponse] = await Promise.all([
     codeBuild.batchGetBuildBatches({ ids: [id] }),
   ]).catch((err) => {
-    errObject = err;
+    errObject = err
     /* Returning [] here so that the assignment above
      * does not throw `TypeError: undefined is not iterable`.
      * The error is handled below,
      * since it might be a rate limit.
      */
-    return [];
-  });
+    return []
+  })
 
   if (errObject) {
     //We caught an error in trying to make the AWS api call, and are now checking to see if it was just a rate limiting error
-    if (errObject.message && errObject.message.search("Rate exceeded") !== -1) {
+    if (errObject.message && errObject.message.search('Rate exceeded') !== -1) {
       // We were rate-limited, so add backoff with Full Jitter, ref: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
       let jitteredBackOff = Math.floor(
         Math.random() * (updateBackOff * 2 ** throttleCount)
-      );
-      let newWait = updateInterval + jitteredBackOff;
-      throttleCount++;
+      )
+      let newWait = updateInterval + jitteredBackOff
+      throttleCount++
 
       //Sleep before trying again
-      await new Promise((resolve) => setTimeout(resolve, newWait));
+      await new Promise((resolve) => setTimeout(resolve, newWait))
 
       // Try again from the same token position
       return waitForBuildEndTime(
@@ -157,69 +169,71 @@ async function waitForBuildEndTime(
         seqEmptyLogs,
         totalEvents,
         throttleCount
-      );
+      )
     } else {
       //The error returned from the API wasn't about rate limiting, so throw it as an actual error and fail the job
-      throw errObject;
+      throw errObject
     }
   }
 
   // Pluck off the relevant state
-  const [current] = buildBatchesResponse.buildBatches;
+  const [current] = buildBatchesResponse.buildBatches
 
   if (!hideCloudWatchLogs && current.buildGroups) {
-    const arns = current.buildGroups.map(buildGroup => buildGroup.currentBuildSummary.arn)
+    const arns = current.buildGroups.map(
+      (buildGroup) => buildGroup.currentBuildSummary.arn
+    )
 
     const [batchesResponse] = await Promise.all([
       codeBuild.batchGetBuilds({ ids: arns }),
     ]).catch((err) => {
-      errObject = err;
+      errObject = err
       /* Returning [] here so that the assignment above
        * does not throw `TypeError: undefined is not iterable`.
        * The error is handled below,
        * since it might be a rate limit.
        */
-      return [];
-    });
+      return []
+    })
 
-    const logPromises = batchesResponse.builds.map(build => resolveBuildLogs(sdk, build))
+    const logPromises = batchesResponse.builds.map((build) =>
+      resolveBuildLogs(sdk, build)
+    )
 
     const logResponses = await Promise.all(logPromises).catch((err) => {
-      errObject = err;
+      errObject = err
       /* Returning [] here so that the assignment above
        * does not throw `TypeError: undefined is not iterable`.
        * The error is handled below,
        * since it might be a rate limit.
        */
-      return [];
-    });
+      return []
+    })
 
-    const events = logResponses.filter(logResponse => !!logResponse).reduce((allEvents, {events}) => [
-      ...allEvents,
-      ...events,
-    ], [])
+    const events = logResponses
+      .filter((logResponse) => !!logResponse)
+      .reduce((allEvents, { events }) => [...allEvents, ...events], [])
 
     // GetLogEvents can return partial/empty responses even when there is data.
     // We wait for two consecutive empty log responses to minimize false positive on EOF.
     // Empty response counter starts after any logs have been received, or when the build completes.
     if (events.length == 0 && (totalEvents > 0 || current.endTime)) {
-      seqEmptyLogs++;
+      seqEmptyLogs++
     } else {
-      seqEmptyLogs = 0;
+      seqEmptyLogs = 0
     }
-    totalEvents += events.length;
-
+    totalEvents += events.length
 
     // stdout the CloudWatchLog (everyone likes progress...)
     // CloudWatchLogs have line endings.
     // I trim and then log each line
     // to ensure that the line ending is OS specific.
-    events.forEach(({ message }) => console.log(message.trimEnd()));
+    events.forEach(({ message }) => console.log(message.trimEnd()))
   }
 
   // Stop after the build is ended and we've received two consecutive empty log responses
   if (current.endTime && seqEmptyLogs >= 2) {
-    return current;
+    return current
   }
 
   // More to do: Sleep for a few seconds to avoid rate limiting
@@ -231,7 +245,7 @@ async function waitForBuildEndTime(
         ? updateInterval / 2
         : updateInterval
     )
-  );
+  )
 
   // Try again
   return waitForBuildEndTime(
@@ -241,15 +255,15 @@ async function waitForBuildEndTime(
     seqEmptyLogs,
     totalEvents,
     throttleCount
-  );
+  )
 }
 
 function githubInputs() {
-  const projectName = core.getInput("project-name", { required: true });
+  const projectName = core.getInput('project-name', { required: true })
   const disableSourceOverride =
-    core.getInput("disable-source-override", { required: false }) === "true";
-  const { owner, repo } = github.context.repo;
-  const { payload } = github.context;
+    core.getInput('disable-source-override', { required: false }) === 'true'
+  const { owner, repo } = github.context.repo
+  const { payload } = github.context
   // The github.context.sha is evaluated on import.
   // This makes it hard to test.
   // So I use the raw ENV.
@@ -257,61 +271,60 @@ function githubInputs() {
   // the GITHUB_SHA value is NOT the correct value.
   // See: https://github.com/aws-actions/aws-codebuild-run-build/issues/36
   const sourceVersion =
-    core.getInput("source-version-override", { required: false }) || 
-    (process.env[`GITHUB_EVENT_NAME`] === "pull_request"
+    core.getInput('source-version-override', { required: false }) ||
+    (process.env[`GITHUB_EVENT_NAME`] === 'pull_request'
       ? (((payload || {}).pull_request || {}).head || {}).sha
-      : process.env[`GITHUB_SHA`]);
+      : process.env[`GITHUB_SHA`])
 
-  assert(sourceVersion, "No source version could be evaluated.");
+  assert(sourceVersion, 'No source version could be evaluated.')
   const buildspecOverride =
-    core.getInput("buildspec-override", { required: false }) || undefined;
+    core.getInput('buildspec-override', { required: false }) || undefined
 
   const computeTypeOverride =
-    core.getInput("compute-type-override", { required: false }) || undefined;
+    core.getInput('compute-type-override', { required: false }) || undefined
 
   const environmentTypeOverride =
-    core.getInput("environment-type-override", { required: false }) ||
-    undefined;
+    core.getInput('environment-type-override', { required: false }) || undefined
 
   const imageOverride =
-    core.getInput("image-override", { required: false }) || undefined;
+    core.getInput('image-override', { required: false }) || undefined
 
   const imagePullCredentialsTypeOverride =
-    core.getInput("image-pull-credentials-type-override", {
+    core.getInput('image-pull-credentials-type-override', {
       required: false,
-    }) || undefined;
+    }) || undefined
 
   const envPassthrough = core
-    .getInput("env-vars-for-codebuild", { required: false })
-    .split(",")
+    .getInput('env-vars-for-codebuild', { required: false })
+    .split(',')
     .map((i) => i.trim())
-    .filter((i) => i !== "");
+    .filter((i) => i !== '')
 
   const updateInterval =
     parseInt(
-      core.getInput("update-interval", { required: false }) || "30",
+      core.getInput('update-interval', { required: false }) || '30',
       10
-    ) * 1000;
+    ) * 1000
   const updateBackOff =
     parseInt(
-      core.getInput("update-back-off", { required: false }) || "15",
+      core.getInput('update-back-off', { required: false }) || '15',
       10
-    ) * 1000;
+    ) * 1000
 
   const hideCloudWatchLogs =
-    core.getInput("hide-cloudwatch-logs", { required: false }) === "true";
+    core.getInput('hide-cloudwatch-logs', { required: false }) === 'true'
 
   const disableGithubEnvVars =
-    core.getInput("disable-github-env-vars", { required: false }) === "true";
+    core.getInput('disable-github-env-vars', { required: false }) === 'true'
 
   const artifactsTypeOverride =
-    core.getInput("artifacts-type-override", { required: false }) || undefined;
+    core.getInput('artifacts-type-override', { required: false }) || undefined
 
   const stopOnSignals = core
-    .getInput("stop-on-signals", { required: false })
-    .split(",")
+    .getInput('stop-on-signals', { required: false })
+    .split(',')
     .map((i) => i.trim())
-    .filter((i) => i !== "");
+    .filter((i) => i !== '')
 
   return {
     projectName,
@@ -331,7 +344,7 @@ function githubInputs() {
     disableGithubEnvVars,
     artifactsTypeOverride,
     stopOnSignals,
-  };
+  }
 }
 
 function inputs2Parameters(inputs) {
@@ -349,15 +362,15 @@ function inputs2Parameters(inputs) {
     disableSourceOverride,
     disableGithubEnvVars,
     artifactsTypeOverride,
-  } = inputs;
+  } = inputs
 
   const sourceOverride = !disableSourceOverride
     ? {
         sourceVersion: sourceVersion,
-        sourceTypeOverride: "GITHUB",
+        sourceTypeOverride: 'GITHUB',
         sourceLocationOverride: `https://github.com/${owner}/${repo}.git`,
       }
-    : {};
+    : {}
 
   const artifactsOverride = artifactsTypeOverride
     ? {
@@ -365,15 +378,15 @@ function inputs2Parameters(inputs) {
           type: artifactsTypeOverride,
         },
       }
-    : {};
+    : {}
 
   const environmentVariablesOverride = Object.entries(process.env)
     .filter(
       ([key]) =>
-        (!disableGithubEnvVars && key.startsWith("GITHUB_")) ||
+        (!disableGithubEnvVars && key.startsWith('GITHUB_')) ||
         envPassthrough.includes(key)
     )
-    .map(([name, value]) => ({ name, value, type: "PLAINTEXT" }));
+    .map(([name, value]) => ({ name, value, type: 'PLAINTEXT' }))
 
   // The idempotencyToken is intentionally not set.
   // This way the GitHub events can manage the builds.
@@ -387,17 +400,17 @@ function inputs2Parameters(inputs) {
     imageOverride,
     imagePullCredentialsTypeOverride,
     environmentVariablesOverride,
-  };
+  }
 }
 
 function buildSdk() {
   const codeBuild = new CodeBuild({
-    customUserAgent: "aws-actions/aws-codebuild-run-build",
-  });
+    customUserAgent: 'aws-actions/aws-codebuild-run-build',
+  })
 
   const cloudWatchLogs = new CloudWatchLogs({
-    customUserAgent: "aws-actions/aws-codebuild-run-build",
-  });
+    customUserAgent: 'aws-actions/aws-codebuild-run-build',
+  })
 
   // check if environment variable exists for the container credential provider
   if (
@@ -406,26 +419,26 @@ function buildSdk() {
   ) {
     assert(
       codeBuild.config.credentials && cloudWatchLogs.config.credentials,
-      "No credentials. Try adding @aws-actions/configure-aws-credentials earlier in your job to set up AWS credentials."
-    );
+      'No credentials. Try adding @aws-actions/configure-aws-credentials earlier in your job to set up AWS credentials.'
+    )
   }
 
-  return { codeBuild, cloudWatchLogs };
+  return { codeBuild, cloudWatchLogs }
 }
 
 function logName(Arn) {
   const logs = {
     logGroupName: undefined,
     logStreamName: undefined,
-  };
+  }
   if (Arn) {
-    const [logGroupName, logStreamName] = Arn.split(":log-group:")
+    const [logGroupName, logStreamName] = Arn.split(':log-group:')
       .pop()
-      .split(":log-stream:");
-    if (logGroupName !== "null" && logStreamName !== "null") {
-      logs.logGroupName = logGroupName;
-      logs.logStreamName = logStreamName;
+      .split(':log-stream:')
+    if (logGroupName !== 'null' && logStreamName !== 'null') {
+      logs.logGroupName = logGroupName
+      logs.logStreamName = logStreamName
     }
   }
-  return logs;
+  return logs
 }
