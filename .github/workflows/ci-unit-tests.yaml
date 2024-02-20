@@ -2,6 +2,9 @@ name: Unit tests
 
 on: [pull_request, push]
 
+env:
+  NPM_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   ci-unit-tests:
     permissions:
@@ -13,6 +16,7 @@ jobs:
         with:
           # This should match the using value in `actions.yaml`
           node-version: 20
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@fond-of'
       - run: npm ci
       - run: npm run lint
-      - run: npm run test
