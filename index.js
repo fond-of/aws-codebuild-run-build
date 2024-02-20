@@ -20,8 +20,8 @@ async function run() {
 
     // Signal the outcome
     assert(
-      build.buildStatus === "SUCCEEDED",
-      `Build status: ${build.buildStatus}`
+      build.buildBatchStatus === "SUCCEEDED",
+      `Build status: ${build.buildBatchStatus}`
     );
   } catch (error) {
     core.setFailed(error.message);

@@ -43,13 +43,13 @@ function runBuild() {
 
 async function build(sdk, params, config) {
   // Start the build
-  const start = await sdk.codeBuild.startBuild(params);
+  const start = await sdk.codeBuild.startBuildBatch(params);
 
   // Set up signal handling to stop the build on cancellation
-  setupSignalHandlers(sdk, start.build.id, config.stopOnSignals);
+  setupSignalHandlers(sdk, start.buildBatch.id, config.stopOnSignals);
 
   // Wait for the build to "complete"
-  return waitForBuildEndTime(sdk, start.build, config);
+  return waitForBuildEndTime(sdk, start.buildBatch, config);
 }
 
 function setupSignalHandlers(sdk, id, signals) {
@@ -58,7 +58,7 @@ function setupSignalHandlers(sdk, id, signals) {
     process.on(s, async () => {
       try {
         core.info(`Caught ${s}, attempting to stop build...`);
-        await sdk.codeBuild.stopBuild({ id });
+        await sdk.codeBuild.stopBuildBatch({ id });
       } catch (ex) {
         core.error(`Error stopping build: ${ex}`);
       }
@@ -66,39 +66,66 @@ function setupSignalHandlers(sdk, id, signals) {
   });
 }
 
+const startFromHeads = {}
+const nextTokens = {}
+
+async function resolveBuildLogs (sdk, {logs, environment: {environmentVariables}}) {
+  const { cloudWatchLogs } = sdk;
+  const {groupName: logGroupName, streamName: logStreamName} = logs;
+
+  if (!(logStreamName in startFromHeads)) {
+    startFromHeads[logStreamName] = true
+  }
+
+  const startFromHead = startFromHeads[logStreamName]
+  const nextToken = nextTokens[logStreamName]
+
+  if (!logGroupName) {
+    return
+  }
+
+  const logsResponse = await cloudWatchLogs
+      .getLogEvents({
+        logGroupName,
+        logStreamName,
+        startFromHead,
+        nextToken,
+      })
+
+  nextTokens[logStreamName] = logsResponse.nextForwardToken
+  startFromHeads[logStreamName] = false
+
+  const browser = (environmentVariables.find(environmentVariable => environmentVariable.name === 'CYPRESS_BROWSER') || {value: undefined}).value
+  const brand = (environmentVariables.find(environmentVariable => environmentVariable.name === 'BRAND') || {value: undefined}).value
+
+  const prefixes = [brand, browser].filter(env => !!env)
+
+  logsResponse.events = logsResponse.events.map(event => ({
+    ...event,
+    message: prefixes ? `[${prefixes.join('_')}] ${event.message}` : event.message
+  }))
+
+  return logsResponse
+}
+
 async function waitForBuildEndTime(
   sdk,
-  { id, logs },
+  { id, logConfig },
   { updateInterval, updateBackOff, hideCloudWatchLogs },
   seqEmptyLogs,
   totalEvents,
-  throttleCount,
-  nextToken
+  throttleCount
 ) {
-  const { codeBuild, cloudWatchLogs } = sdk;
+  const { codeBuild } = sdk;
 
   totalEvents = totalEvents || 0;
   seqEmptyLogs = seqEmptyLogs || 0;
   throttleCount = throttleCount || 0;
 
-  // Get the CloudWatchLog info
-  const startFromHead = true;
-  const { cloudWatchLogsArn } = logs;
-  const { logGroupName, logStreamName } = logName(cloudWatchLogsArn);
-
   let errObject = false;
   // Check the state
-  const [batch, cloudWatch = {}] = await Promise.all([
-    codeBuild.batchGetBuilds({ ids: [id] }),
-    !hideCloudWatchLogs &&
-      logGroupName &&
-      cloudWatchLogs // only make the call if hideCloudWatchLogs is not enabled and a logGroupName exists
-        .getLogEvents({
-          logGroupName,
-          logStreamName,
-          startFromHead,
-          nextToken,
-        }),
+  const [buildBatchesResponse] = await Promise.all([
+    codeBuild.batchGetBuildBatches({ ids: [id] }),
   ]).catch((err) => {
     errObject = err;
     /* Returning [] here so that the assignment above
@@ -125,12 +152,11 @@ async function waitForBuildEndTime(
       // Try again from the same token position
       return waitForBuildEndTime(
         { ...sdk },
-        { id, logs },
+        { id, logConfig },
         { updateInterval: newWait, updateBackOff },
         seqEmptyLogs,
         totalEvents,
-        throttleCount,
-        nextToken
+        throttleCount
       );
     } else {
       //The error returned from the API wasn't about rate limiting, so throw it as an actual error and fail the job
@@ -139,24 +165,57 @@ async function waitForBuildEndTime(
   }
 
   // Pluck off the relevant state
-  const [current] = batch.builds;
-  const { nextForwardToken, events = [] } = cloudWatch;
+  const [current] = buildBatchesResponse.buildBatches;
 
-  // GetLogEvents can return partial/empty responses even when there is data.
-  // We wait for two consecutive empty log responses to minimize false positive on EOF.
-  // Empty response counter starts after any logs have been received, or when the build completes.
-  if (events.length == 0 && (totalEvents > 0 || current.endTime)) {
-    seqEmptyLogs++;
-  } else {
-    seqEmptyLogs = 0;
+  if (!hideCloudWatchLogs && current.buildGroups) {
+    const arns = current.buildGroups.map(buildGroup => buildGroup.currentBuildSummary.arn)
+
+    const [batchesResponse] = await Promise.all([
+      codeBuild.batchGetBuilds({ ids: arns }),
+    ]).catch((err) => {
+      errObject = err;
+      /* Returning [] here so that the assignment above
+       * does not throw `TypeError: undefined is not iterable`.
+       * The error is handled below,
+       * since it might be a rate limit.
+       */
+      return [];
+    });
+
+    const logPromises = batchesResponse.builds.map(build => resolveBuildLogs(sdk, build))
+
+    const logResponses = await Promise.all(logPromises).catch((err) => {
+      errObject = err;
+      /* Returning [] here so that the assignment above
+       * does not throw `TypeError: undefined is not iterable`.
+       * The error is handled below,
+       * since it might be a rate limit.
+       */
+      return [];
+    });
+
+    const events = logResponses.filter(logResponse => !!logResponse).reduce((allEvents, {events}) => [
+      ...allEvents,
+      ...events,
+    ], [])
+
+    // GetLogEvents can return partial/empty responses even when there is data.
+    // We wait for two consecutive empty log responses to minimize false positive on EOF.
+    // Empty response counter starts after any logs have been received, or when the build completes.
+    if (events.length == 0 && (totalEvents > 0 || current.endTime)) {
+      seqEmptyLogs++;
+    } else {
+      seqEmptyLogs = 0;
+    }
+    totalEvents += events.length;
+
+
+    // stdout the CloudWatchLog (everyone likes progress...)
+    // CloudWatchLogs have line endings.
+    // I trim and then log each line
+    // to ensure that the line ending is OS specific.
+    events.forEach(({ message }) => console.log(message.trimEnd()));
   }
-  totalEvents += events.length;
-
-  // stdout the CloudWatchLog (everyone likes progress...)
-  // CloudWatchLogs have line endings.
-  // I trim and then log each line
-  // to ensure that the line ending is OS specific.
-  events.forEach(({ message }) => console.log(message.trimEnd()));
 
   // Stop after the build is ended and we've received two consecutive empty log responses
   if (current.endTime && seqEmptyLogs >= 2) {
@@ -181,8 +240,7 @@ async function waitForBuildEndTime(
     { updateInterval, updateBackOff, hideCloudWatchLogs },
     seqEmptyLogs,
     totalEvents,
-    throttleCount,
-    nextForwardToken
+    throttleCount
   );
 }
 
